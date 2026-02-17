@@ -2,9 +2,29 @@ package git
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
+
+// runGitCommand runs a git command in the current working directory
+// (the same repository where `po` was invoked).
+func runGitCommand(args ...string) ([]byte, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	cmd := exec.Command("git", args...)
+	cmd.Dir = wd
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return output, fmt.Errorf("git %s failed: %s: %w", strings.Join(args, " "), string(output), err)
+	}
+
+	return output, nil
+}
 
 // IsInstalled checks if the git command is available in the system PATH.
 // It returns true if git is found, and false otherwise.
@@ -21,10 +41,9 @@ type FileStatus struct {
 
 // GetStatus returns a list of files with their status.
 func GetStatus() ([]FileStatus, error) {
-	cmd := exec.Command("git", "status", "--porcelain")
-	out, err := cmd.CombinedOutput()
+	out, err := runGitCommand("status", "--porcelain")
 	if err != nil {
-		return nil, fmt.Errorf("git status failed: %s: %w", string(out), err)
+		return nil, err
 	}
 
 	var files []FileStatus
@@ -45,38 +64,34 @@ func StageFiles(files []string) error {
 		return nil
 	}
 	args := append([]string{"add"}, files...)
-	cmd := exec.Command("git", args...)
-	output, err := cmd.CombinedOutput()
+	_, err := runGitCommand(args...)
 	if err != nil {
-		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+		return err
 	}
 	return nil
 }
 
 // Commit creates a new commit with the given message.
 func Commit(message string) error {
-	cmd := exec.Command("git", "commit", "-m", message)
-	output, err := cmd.CombinedOutput()
+	_, err := runGitCommand("commit", "-m", message)
 	if err != nil {
-		return fmt.Errorf("git commit failed: %s: %w", string(output), err)
+		return err
 	}
 	return nil
 }
 
 // GetCurrentBranch returns the name of the current branch.
 func GetCurrentBranch() (string, error) {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	output, err := cmd.CombinedOutput()
+	output, err := runGitCommand("rev-parse", "--abbrev-ref", "HEAD")
 	if err != nil {
-		return "", fmt.Errorf("failed to get current branch: %s: %w", string(output), err)
+		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
 // HasUpstream checks if the current branch has an upstream tracking branch set.
 func HasUpstream() bool {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-	err := cmd.Run()
+	_, err := runGitCommand("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
 	return err == nil
 }
 
@@ -88,28 +103,25 @@ func Push() error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command("git", "push", "--set-upstream", "origin", branch)
-		output, err := cmd.CombinedOutput()
+		_, err = runGitCommand("push", "--set-upstream", "origin", branch)
 		if err != nil {
-			return fmt.Errorf("git push failed: %s: %w", string(output), err)
+			return err
 		}
 		return nil
 	}
 
-	cmd := exec.Command("git", "push")
-	output, err := cmd.CombinedOutput()
+	_, err := runGitCommand("push")
 	if err != nil {
-		return fmt.Errorf("git push failed: %s: %w", string(output), err)
+		return err
 	}
 	return nil
 }
 
 // Fetch fetches updates from the remote.
 func Fetch() error {
-	cmd := exec.Command("git", "fetch")
-	output, err := cmd.CombinedOutput()
+	_, err := runGitCommand("fetch")
 	if err != nil {
-		return fmt.Errorf("git fetch failed: %s: %w", string(output), err)
+		return err
 	}
 	return nil
 }
@@ -127,10 +139,9 @@ func Pull(mode string) error {
 		args = append(args, "--no-rebase")
 	}
 
-	cmd := exec.Command("git", args...)
-	output, err := cmd.CombinedOutput()
+	_, err := runGitCommand(args...)
 	if err != nil {
-		return fmt.Errorf("git pull failed: %s: %w", string(output), err)
+		return err
 	}
 	return nil
 }

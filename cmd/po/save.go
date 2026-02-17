@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"po/internal/git"
 
@@ -11,7 +12,7 @@ import (
 )
 
 func runSave() error {
-	// 1. Check status
+	// 1) Read git status
 	files, err := git.GetStatus()
 	if err != nil {
 		return fmt.Errorf("failed to get git status: %w", err)
@@ -22,23 +23,96 @@ func runSave() error {
 		return nil
 	}
 
-	// 2. Form: File Selection
-	var selectedFiles []string
-
-	// Prepare options for file selection
-	// We want a special option for "." (all files)
-	// Note: huh MultiSelect returns the values of the selected options.
-
-	options := make([]huh.Option[string], 0, len(files)+1)
-	options = append(options, huh.NewOption("All files (.)", "."))
-
+	// Build a deduped list of status paths for safe normalization/validation.
+	statusPathSet := make(map[string]struct{}, len(files))
+	statusPaths := make([]string, 0, len(files))
 	for _, f := range files {
-		// Display format: [M ] path/to/file
-		label := fmt.Sprintf("[%s] %s", f.Code, f.Path)
-		options = append(options, huh.NewOption(label, f.Path))
+		p := strings.TrimSpace(f.Path)
+		if p == "" {
+			continue
+		}
+		if _, exists := statusPathSet[p]; !exists {
+			statusPathSet[p] = struct{}{}
+			statusPaths = append(statusPaths, p)
+		}
 	}
 
-	// 3. Form: Commit Type
+	if len(statusPaths) == 0 {
+		fmt.Println("No valid changed paths found.")
+		return nil
+	}
+
+	// 2) File selection form (only file selection in first step)
+	var selectedRaw []string
+	fileOptions := make([]huh.Option[string], 0, len(statusPaths)+1)
+	fileOptions = append(fileOptions, huh.NewOption("All changed files", "__ALL__"))
+
+	// Display each changed path once.
+	for _, f := range files {
+		p := strings.TrimSpace(f.Path)
+		if p == "" {
+			continue
+		}
+		// Keep label informative, value is the path.
+		label := fmt.Sprintf("[%s] %s", strings.TrimSpace(f.Code), p)
+		fileOptions = append(fileOptions, huh.NewOption(label, p))
+	}
+
+	selectForm := huh.NewForm(
+		huh.NewGroup(
+			huh.NewMultiSelect[string]().
+				Title("Select files to save").
+				Description("Choose one or many files. Use space to toggle selections.").
+				Options(fileOptions...).
+				Value(&selectedRaw).
+				Filterable(true),
+		),
+	)
+
+	if err := selectForm.Run(); err != nil {
+		if errors.Is(err, huh.ErrUserAborted) {
+			fmt.Println("Aborted.")
+			os.Exit(0)
+		}
+		return err
+	}
+
+	if len(selectedRaw) == 0 {
+		fmt.Println("No files selected. Aborting.")
+		return nil
+	}
+
+	// 3) Normalize selected file list
+	stageAll := false
+	normalizedSet := make(map[string]struct{}, len(selectedRaw))
+	normalized := make([]string, 0, len(selectedRaw))
+
+	for _, item := range selectedRaw {
+		v := strings.TrimSpace(item)
+		if v == "" {
+			continue
+		}
+		if v == "__ALL__" {
+			stageAll = true
+			continue
+		}
+		// Only allow paths that are currently reported by git status.
+		if _, ok := statusPathSet[v]; !ok {
+			continue
+		}
+		if _, seen := normalizedSet[v]; seen {
+			continue
+		}
+		normalizedSet[v] = struct{}{}
+		normalized = append(normalized, v)
+	}
+
+	if !stageAll && len(normalized) == 0 {
+		fmt.Println("No valid files selected. Aborting.")
+		return nil
+	}
+
+	// 4) Commit metadata form (after file selection)
 	var commitType string
 	typeOptions := []huh.Option[string]{
 		huh.NewOption("feat: New user-facing capability", "feat"),
@@ -54,18 +128,8 @@ func runSave() error {
 		huh.NewOption("revert: Revert a commit", "revert"),
 	}
 
-	// 4. Form: Commit Message
 	var commitMsg string
-
-	// Build the form
-	form := huh.NewForm(
-		huh.NewGroup(
-			huh.NewMultiSelect[string]().
-				Title("Select files to save").
-				Options(options...).
-				Value(&selectedFiles).
-				Filterable(true),
-		),
+	commitForm := huh.NewForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("What sort of save is it?").
@@ -75,12 +139,17 @@ func runSave() error {
 			huh.NewInput().
 				Title("Commit message").
 				Placeholder("Brief description of changes").
-				Value(&commitMsg),
+				Value(&commitMsg).
+				Validate(func(s string) error {
+					if strings.TrimSpace(s) == "" {
+						return errors.New("commit message cannot be empty")
+					}
+					return nil
+				}),
 		),
 	)
 
-	err = form.Run()
-	if err != nil {
+	if err := commitForm.Run(); err != nil {
 		if errors.Is(err, huh.ErrUserAborted) {
 			fmt.Println("Aborted.")
 			os.Exit(0)
@@ -88,37 +157,19 @@ func runSave() error {
 		return err
 	}
 
-	if len(selectedFiles) == 0 {
-		fmt.Println("No files selected. Aborting.")
-		return nil
-	}
-
-	// 5. Execution
-
-	// Handle "." selection
-	stageAll := false
-	for _, f := range selectedFiles {
-		if f == "." {
-			stageAll = true
-			break
-		}
-	}
-
+	// 5) Execute stage -> commit -> push
 	fmt.Println("Staging files...")
 	if stageAll {
 		if err := git.StageFiles([]string{"."}); err != nil {
 			return fmt.Errorf("failed to stage all files: %w", err)
 		}
 	} else {
-		// Filter out the "." if it somehow got in mixed with others (though logic above handles it)
-		// and verify files still exist in the original list to be safe, or just pass paths.
-		// git.StageFiles expects paths.
-		if err := git.StageFiles(selectedFiles); err != nil {
-			return fmt.Errorf("failed to stage files: %w", err)
+		if err := git.StageFiles(normalized); err != nil {
+			return fmt.Errorf("failed to stage selected files: %w", err)
 		}
 	}
 
-	fullMessage := fmt.Sprintf("%s: %s", commitType, commitMsg)
+	fullMessage := fmt.Sprintf("%s: %s", commitType, strings.TrimSpace(commitMsg))
 	fmt.Printf("Committing: %s\n", fullMessage)
 	if err := git.Commit(fullMessage); err != nil {
 		return fmt.Errorf("failed to commit: %w", err)
@@ -129,6 +180,6 @@ func runSave() error {
 		return fmt.Errorf("failed to push: %w", err)
 	}
 
-	fmt.Println("Success! 🚀")
+	fmt.Println("Success!")
 	return nil
 }
