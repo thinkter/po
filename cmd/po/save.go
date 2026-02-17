@@ -48,11 +48,16 @@ func runSave() error {
 	fileOptions = append(fileOptions, huh.NewOption("All changed files", "__ALL__"))
 
 	// Display each changed path once.
+	displayed := make(map[string]struct{}, len(statusPaths))
 	for _, f := range files {
 		p := strings.TrimSpace(f.Path)
 		if p == "" {
 			continue
 		}
+		if _, seen := displayed[p]; seen {
+			continue
+		}
+		displayed[p] = struct{}{}
 		// Keep label informative, value is the path.
 		label := fmt.Sprintf("[%s] %s", strings.TrimSpace(f.Code), p)
 		fileOptions = append(fileOptions, huh.NewOption(label, p))
@@ -157,19 +162,103 @@ func runSave() error {
 		return err
 	}
 
-	// 5) Execute stage -> commit -> push
-	fmt.Println("Staging files...")
+	fullMessage := fmt.Sprintf("%s: %s", commitType, strings.TrimSpace(commitMsg))
+
+	// Build final selected set for easy membership checks.
+	selectedSet := make(map[string]struct{}, len(statusPaths))
 	if stageAll {
-		if err := git.StageFiles([]string{"."}); err != nil {
-			return fmt.Errorf("failed to stage all files: %w", err)
+		for _, p := range statusPaths {
+			selectedSet[p] = struct{}{}
 		}
 	} else {
-		if err := git.StageFiles(normalized); err != nil {
-			return fmt.Errorf("failed to stage selected files: %w", err)
+		for _, p := range normalized {
+			selectedSet[p] = struct{}{}
 		}
 	}
 
-	fullMessage := fmt.Sprintf("%s: %s", commitType, strings.TrimSpace(commitMsg))
+	// Detect whether selected changes include .gitignore.
+	gitignoreCandidates := []string{".gitignore"}
+	for p := range selectedSet {
+		if strings.HasSuffix(p, "/.gitignore") {
+			gitignoreCandidates = append(gitignoreCandidates, p)
+		}
+	}
+	gitignorePath := ""
+	for _, candidate := range gitignoreCandidates {
+		if _, ok := selectedSet[candidate]; ok && git.IsTracked(candidate) {
+			gitignorePath = candidate
+			break
+		}
+	}
+	if gitignorePath == "" {
+		for _, candidate := range gitignoreCandidates {
+			if _, ok := selectedSet[candidate]; ok {
+				gitignorePath = candidate
+				break
+			}
+		}
+	}
+
+	// 5) If .gitignore is part of this save, commit and push it first.
+	if gitignorePath != "" {
+		fmt.Printf("Prioritizing %s in a separate commit...\n", gitignorePath)
+		if err := git.StageFiles([]string{gitignorePath}); err != nil {
+			return fmt.Errorf("failed to stage %s: %w", gitignorePath, err)
+		}
+		if err := git.Commit("chore(gitignore): update ignore rules"); err != nil {
+			return fmt.Errorf("failed to commit %s: %w", gitignorePath, err)
+		}
+		fmt.Println("Pushing .gitignore commit...")
+		if err := git.Push(); err != nil {
+			return fmt.Errorf("failed to push %s commit: %w", gitignorePath, err)
+		}
+
+		// After .gitignore update lands, remove now-ignored tracked files.
+		fmt.Println("Checking for tracked files now ignored by updated .gitignore...")
+		ignoredTracked, err := git.GetTrackedIgnoredFiles()
+		if err != nil {
+			return fmt.Errorf("failed to detect tracked ignored files: %w", err)
+		}
+
+		if len(ignoredTracked) > 0 {
+			fmt.Printf("Untracking %d ignored file(s) from repository...\n", len(ignoredTracked))
+			if err := git.RemoveCached(ignoredTracked); err != nil {
+				return fmt.Errorf("failed to untrack ignored files: %w", err)
+			}
+			if err := git.Commit("chore(gitignore): untrack ignored files"); err != nil {
+				return fmt.Errorf("failed to commit ignored-file cleanup: %w", err)
+			}
+			fmt.Println("Pushing ignored-file cleanup commit...")
+			if err := git.Push(); err != nil {
+				return fmt.Errorf("failed to push ignored-file cleanup commit: %w", err)
+			}
+		} else {
+			fmt.Println("No tracked files are currently matched by ignore rules.")
+		}
+
+		// Don't include .gitignore in the final general commit.
+		delete(selectedSet, gitignorePath)
+	}
+
+	// 6) Stage, commit, push remaining selected files.
+	remaining := make([]string, 0, len(selectedSet))
+	for _, p := range statusPaths {
+		if _, ok := selectedSet[p]; ok {
+			remaining = append(remaining, p)
+		}
+	}
+
+	if len(remaining) == 0 {
+		fmt.Println("No remaining selected files to save after gitignore flow.")
+		fmt.Println("Success!")
+		return nil
+	}
+
+	fmt.Println("Staging remaining selected files...")
+	if err := git.StageFiles(remaining); err != nil {
+		return fmt.Errorf("failed to stage selected files: %w", err)
+	}
+
 	fmt.Printf("Committing: %s\n", fullMessage)
 	if err := git.Commit(fullMessage); err != nil {
 		return fmt.Errorf("failed to commit: %w", err)

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -138,6 +139,58 @@ func Pull(mode string) error {
 	case "merge":
 		args = append(args, "--no-rebase")
 	}
+
+	_, err := runGitCommand(args...)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// IsTracked checks whether a path is currently tracked by git.
+func IsTracked(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	_, err := runGitCommand("ls-files", "--error-unmatch", "--", path)
+	return err == nil
+}
+
+// GetTrackedIgnoredFiles returns files that are tracked by git but now ignored
+// by .gitignore or other standard excludes.
+func GetTrackedIgnoredFiles() ([]string, error) {
+	out, err := runGitCommand("ls-files", "-ci", "--exclude-standard", "-z")
+	if err != nil {
+		return nil, err
+	}
+
+	raw := bytes.Split(out, []byte{0})
+	files := make([]string, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+
+	for _, item := range raw {
+		p := strings.TrimSpace(string(item))
+		if p == "" {
+			continue
+		}
+		if _, exists := seen[p]; exists {
+			continue
+		}
+		seen[p] = struct{}{}
+		files = append(files, p)
+	}
+
+	return files, nil
+}
+
+// RemoveCached removes paths from git index only (keeps files in working tree).
+func RemoveCached(paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+
+	args := []string{"rm", "--cached", "--"}
+	args = append(args, paths...)
 
 	_, err := runGitCommand(args...)
 	if err != nil {
