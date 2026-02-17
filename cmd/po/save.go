@@ -123,14 +123,14 @@ func runSave() error {
 		huh.NewOption("feat: New user-facing capability", "feat"),
 		huh.NewOption("fix: Bug fix", "fix"),
 		huh.NewOption("refactor: Code change without behavior change", "refactor"),
-		huh.NewOption("perf: Performance improvement", "perf"),
-		huh.NewOption("test: Add or modify tests", "test"),
-		huh.NewOption("docs: Documentation only", "docs"),
-		huh.NewOption("style: Formatting, lint, no logic", "style"),
-		huh.NewOption("build: Build system, deps", "build"),
-		huh.NewOption("ci: CI/CD config", "ci"),
-		huh.NewOption("chore: Maintenance, scripts", "chore"),
-		huh.NewOption("revert: Revert a commit", "revert"),
+		// huh.NewOption("perf: Performance improvement", "perf"),
+		// huh.NewOption("test: Add or modify tests", "test"),
+		// huh.NewOption("docs: Documentation only", "docs"),
+		// huh.NewOption("style: Formatting, lint, no logic", "style"),
+		// huh.NewOption("build: Build system, deps", "build"),
+		// huh.NewOption("ci: CI/CD config", "ci"),
+		// huh.NewOption("chore: Maintenance, scripts", "chore"),
+		// huh.NewOption("revert: Revert a commit", "revert"),
 	}
 
 	var commitMsg string
