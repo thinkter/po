@@ -1,3 +1,8 @@
+make build
+make install
+
+
+
 1) basic functionality
 2) interactive tool that sets up everything with git and github with ssh inside your computer automatically  
 
