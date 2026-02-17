@@ -24,7 +24,7 @@ func runSave() error {
 	}
 
 	// Build a deduped list of status paths for safe normalization/validation.
-	statusPathSet := make(map[string]struct{}, len(files))
+	statusPathSet := make(map[string]struct{}, len(files)) //still don't really understand why does this builtin function needs to exist but it just makes this map accessible
 	statusPaths := make([]string, 0, len(files))
 	for _, f := range files {
 		p := strings.TrimSpace(f.Path)
