@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"po/internal/git"
+	"po/internal/workflow"
 
 	"github.com/charmbracelet/huh"
 )
@@ -176,99 +177,14 @@ func runSave() error {
 		}
 	}
 
-	// Detect whether selected changes include .gitignore.
-	gitignoreCandidates := []string{".gitignore"}
+	selectedFiles := make([]string, 0, len(selectedSet))
 	for p := range selectedSet {
-		if strings.HasSuffix(p, "/.gitignore") {
-			gitignoreCandidates = append(gitignoreCandidates, p)
-		}
-	}
-	gitignorePath := ""
-	for _, candidate := range gitignoreCandidates {
-		if _, ok := selectedSet[candidate]; ok && git.IsTracked(candidate) {
-			gitignorePath = candidate
-			break
-		}
-	}
-	if gitignorePath == "" {
-		for _, candidate := range gitignoreCandidates {
-			if _, ok := selectedSet[candidate]; ok {
-				gitignorePath = candidate
-				break
-			}
-		}
+		selectedFiles = append(selectedFiles, p)
 	}
 
-	// 5) If .gitignore is part of this save, commit and push it first.
-	if gitignorePath != "" {
-		fmt.Printf("Prioritizing %s in a separate commit...\n", gitignorePath)
-		if err := git.StageFiles([]string{gitignorePath}); err != nil {
-			return fmt.Errorf("failed to stage %s: %w", gitignorePath, err)
-		}
-		if err := git.Commit("chore(gitignore): update ignore rules"); err != nil {
-			return fmt.Errorf("failed to commit %s: %w", gitignorePath, err)
-		}
-		fmt.Println("Pushing .gitignore commit...")
-		if err := git.Push(); err != nil {
-			return fmt.Errorf("failed to push %s commit: %w", gitignorePath, err)
-		}
-
-		// After .gitignore update lands, remove now-ignored tracked files.
-		fmt.Println("Checking for tracked files now ignored by updated .gitignore...")
-		ignoredTracked, err := git.GetTrackedIgnoredFiles()
-		if err != nil {
-			return fmt.Errorf("failed to detect tracked ignored files: %w", err)
-		}
-
-		if len(ignoredTracked) > 0 {
-			fmt.Printf("Untracking %d ignored file(s) from repository...\n", len(ignoredTracked))
-			if err := git.RemoveCached(ignoredTracked); err != nil {
-				return fmt.Errorf("failed to untrack ignored files: %w", err)
-			}
-			if err := git.Commit("chore(gitignore): untrack ignored files"); err != nil {
-				return fmt.Errorf("failed to commit ignored-file cleanup: %w", err)
-			}
-			fmt.Println("Pushing ignored-file cleanup commit...")
-			if err := git.Push(); err != nil {
-				return fmt.Errorf("failed to push ignored-file cleanup commit: %w", err)
-			}
-		} else {
-			fmt.Println("No tracked files are currently matched by ignore rules.")
-		}
-
-		// Don't include .gitignore in the final general commit.
-		delete(selectedSet, gitignorePath)
+	if err := workflow.Save(selectedFiles, fullMessage); err != nil {
+		return err
 	}
 
-	// 6) Stage, commit, push remaining selected files.
-	remaining := make([]string, 0, len(selectedSet))
-	for _, p := range statusPaths {
-		if _, ok := selectedSet[p]; ok {
-			remaining = append(remaining, p)
-		}
-	}
-
-	if len(remaining) == 0 {
-		fmt.Println("No remaining selected files to save after gitignore flow.")
-		fmt.Println("Success!")
-		return nil
-	}
-
-	fmt.Println("Staging remaining selected files...")
-	if err := git.StageFiles(remaining); err != nil {
-		return fmt.Errorf("failed to stage selected files: %w", err)
-	}
-
-	fmt.Printf("Committing: %s\n", fullMessage)
-	if err := git.Commit(fullMessage); err != nil {
-		return fmt.Errorf("failed to commit: %w", err)
-	}
-
-	fmt.Println("Pushing to remote...")
-	if err := git.Push(); err != nil {
-		return fmt.Errorf("failed to push: %w", err)
-	}
-
-	fmt.Println("Success!")
 	return nil
 }
