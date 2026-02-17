@@ -44,16 +44,8 @@ func runDefaultStatus() error {
 		return err
 	}
 
-	// Group into only:
-	// - saved   => staged
-	// - unsaved => unstaged + untracked
-	type statusGroup struct {
-		saved   []string
-		unsaved []string
-	}
-
-	groups := statusGroup{}
-	savedSet := map[string]struct{}{}
+	// Unsaved = unstaged + untracked (combined)
+	unsaved := make([]string, 0, len(files))
 	unsavedSet := map[string]struct{}{}
 
 	for _, f := range files {
@@ -63,35 +55,18 @@ func runDefaultStatus() error {
 			continue
 		}
 
-		// Untracked is always unsaved.
-		if strings.HasPrefix(code, "??") {
+		isUntracked := strings.HasPrefix(code, "??")
+		isUnstaged := len(code) >= 2 && code[1] != ' ' && code[1] != '?'
+
+		if isUntracked || isUnstaged {
 			if _, exists := unsavedSet[path]; !exists {
 				unsavedSet[path] = struct{}{}
-				groups.unsaved = append(groups.unsaved, path)
-			}
-			continue
-		}
-
-		// X column => staged => saved
-		if len(code) >= 1 && code[0] != ' ' && code[0] != '?' {
-			if _, exists := savedSet[path]; !exists {
-				savedSet[path] = struct{}{}
-				groups.saved = append(groups.saved, path)
-			}
-		}
-
-		// Y column => unstaged => unsaved
-		if len(code) >= 2 && code[1] != ' ' && code[1] != '?' {
-			if _, exists := unsavedSet[path]; !exists {
-				unsavedSet[path] = struct{}{}
-				groups.unsaved = append(groups.unsaved, path)
+				unsaved = append(unsaved, path)
 			}
 		}
 	}
 
-	totalChanges := len(files)
-	savedCount := len(groups.saved)
-	unsavedCount := len(groups.unsaved)
+	unsavedCount := len(unsaved)
 
 	// Styles
 	titleStyle := lipgloss.NewStyle().
@@ -105,17 +80,13 @@ func runDefaultStatus() error {
 	okStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
 	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-
-	savedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	unsavedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
 
 	sectionHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
 	fileBulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
-	// Header
 	fmt.Println(titleStyle.Render("po status"))
 
-	// Summary
 	fmt.Println(lipgloss.JoinHorizontal(
 		lipgloss.Top,
 		labelStyle.Render("Branch: "),
@@ -136,34 +107,20 @@ func runDefaultStatus() error {
 		))
 	}
 
-	if totalChanges == 0 {
+	if unsavedCount == 0 {
 		fmt.Println(okStyle.Render("Status: Clean working tree."))
 	} else {
-		fmt.Println(warnStyle.Render(fmt.Sprintf("Status: %d changed file(s)", totalChanges)))
-		fmt.Println("  " + savedStyle.Render(fmt.Sprintf("Saved: %d", savedCount)))
+		fmt.Println(warnStyle.Render(fmt.Sprintf("Status: %d unsaved file(s)", unsavedCount)))
 		fmt.Println("  " + unsavedStyle.Render(fmt.Sprintf("Unsaved: %d", unsavedCount)))
-	}
-
-	// File lists
-	if totalChanges > 0 {
 		fmt.Println()
 
-		renderFileSection := func(title string, items []string, titleS lipgloss.Style) {
-			if len(items) == 0 {
-				return
-			}
-			fmt.Println(sectionHeaderStyle.Render("▸ " + titleS.Render(title)))
-			for _, p := range items {
-				fmt.Println("  " + fileBulletStyle.Render("•") + " " + valueStyle.Render(p))
-			}
-			fmt.Println()
+		fmt.Println(sectionHeaderStyle.Render("▸ " + unsavedStyle.Render("Unsaved files")))
+		for _, p := range unsaved {
+			fmt.Println("  " + fileBulletStyle.Render("•") + " " + valueStyle.Render(p))
 		}
-
-		renderFileSection("Unsaved files", groups.unsaved, unsavedStyle)
-		renderFileSection("Saved files", groups.saved, savedStyle)
 	}
 
-	// Hints
+	fmt.Println()
 	fmt.Println(sectionHeaderStyle.Render("Hints"))
 	fmt.Println("  " + infoStyle.Render("• Use `po save` to save and push your changes."))
 	fmt.Println("  " + infoStyle.Render("• Use `po sync` to fetch and pull updates from remote."))
