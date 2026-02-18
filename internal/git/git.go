@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -36,26 +37,132 @@ func IsInstalled() bool {
 
 // FileStatus represents the status of a file in git.
 type FileStatus struct {
-	Code string
-	Path string
+	Code    string
+	Path    string
+	OldPath string
+	NewPath string
+}
+
+// EffectivePath returns the path that should generally be used for staging.
+// For renames/copies this is the new path; otherwise it's Path.
+func (f FileStatus) EffectivePath() string {
+	if f.NewPath != "" {
+		return f.NewPath
+	}
+	return f.Path
+}
+
+// parsePorcelainV1Line parses a single `git status --porcelain -z` entry.
+// It handles:
+//   - ordinary records: XY <path>\x00
+//   - rename/copy records: XY <old>\x00<new>\x00
+func parsePorcelainV1Line(code string, firstPath string, secondPath string) (FileStatus, error) {
+	// Preserve porcelain XY exactly as-is; spaces are meaningful (e.g. " M", "M ").
+	if len(code) != 2 {
+		return FileStatus{}, fmt.Errorf("invalid status code %q", code)
+	}
+
+	// Decode quoted paths (if any) to avoid passing literal quotes to git add.
+	unquotedFirst, err := unquoteGitPath(firstPath)
+	if err != nil {
+		return FileStatus{}, fmt.Errorf("failed to parse path %q: %w", firstPath, err)
+	}
+	unquotedSecond, err := unquoteGitPath(secondPath)
+	if err != nil {
+		return FileStatus{}, fmt.Errorf("failed to parse path %q: %w", secondPath, err)
+	}
+
+	// For rename/copy entries, porcelain -z emits old then new in separate NUL fields.
+	if isRenameOrCopy(code) {
+		return FileStatus{
+			Code:    code,
+			Path:    unquotedSecond, // effective path for callers expecting Path
+			OldPath: unquotedFirst,
+			NewPath: unquotedSecond,
+		}, nil
+	}
+
+	return FileStatus{
+		Code: code,
+		Path: unquotedFirst,
+	}, nil
+}
+
+func isRenameOrCopy(code string) bool {
+	// XY two-char status: rename/copy can appear in either index or worktree position.
+	// See git status porcelain docs.
+	return strings.Contains(code, "R") || strings.Contains(code, "C")
+}
+
+// unquoteGitPath removes git-style quoting when present.
+// For porcelain output this is usually C-style quoted strings, e.g.
+// "path with spaces/file.go" or "quote\\\"name.txt".
+func unquoteGitPath(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+
+	// Fast path: not quoted
+	if !(strings.HasPrefix(path, "\"") && strings.HasSuffix(path, "\"")) {
+		return path, nil
+	}
+
+	decoded, err := strconv.Unquote(path)
+	if err != nil {
+		return "", err
+	}
+	return decoded, nil
 }
 
 // GetStatus returns a list of files with their status.
 func GetStatus() ([]FileStatus, error) {
-	out, err := runGitCommand("status", "--porcelain")
+	// Use -z to robustly parse paths with spaces/special characters and renames.
+	out, err := runGitCommand("status", "--porcelain", "-z")
 	if err != nil {
 		return nil, err
 	}
 
-	var files []FileStatus
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		if len(line) > 3 {
-			code := line[:2]
-			path := line[3:]
-			files = append(files, FileStatus{Code: code, Path: path})
-		}
+	if len(out) == 0 {
+		return nil, nil
 	}
+
+	var files []FileStatus
+	items := bytes.Split(out, []byte{0})
+
+	for i := 0; i < len(items); i++ {
+		entry := items[i]
+		if len(entry) == 0 {
+			continue
+		}
+		// Minimum is "XY <path>"
+		if len(entry) < 4 {
+			continue
+		}
+
+		code := string(entry[:2])
+		// porcelain v1 guarantees one space after XY.
+		firstPath := string(entry[3:])
+
+		var secondPath string
+		if isRenameOrCopy(code) {
+			// Rename/copy format with -z: first entry has old path, next item is new path.
+			if i+1 < len(items) {
+				secondPath = string(items[i+1])
+				i++
+			}
+		}
+
+		fs, err := parsePorcelainV1Line(code, firstPath, secondPath)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(fs.EffectivePath()) == "" {
+			continue
+		}
+		files = append(files, fs)
+	}
+
 	return files, nil
 }
 
@@ -64,11 +171,52 @@ func StageFiles(files []string) error {
 	if len(files) == 0 {
 		return nil
 	}
-	args := append([]string{"add"}, files...)
-	_, err := runGitCommand(args...)
+
+	// Revalidate currently changed paths at stage time to reduce race-window issues.
+	current, err := GetStatus()
 	if err != nil {
+		return fmt.Errorf("failed to refresh git status before staging: %w", err)
+	}
+	available := make(map[string]struct{}, len(current))
+	for _, f := range current {
+		p := strings.TrimSpace(f.EffectivePath())
+		if p != "" {
+			available[p] = struct{}{}
+		}
+	}
+
+	valid := make([]string, 0, len(files))
+	var skipped []string
+	for _, p := range files {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if _, ok := available[p]; ok {
+			valid = append(valid, p)
+			continue
+		}
+		skipped = append(skipped, p)
+	}
+
+	if len(valid) == 0 {
+		if len(skipped) > 0 {
+			return fmt.Errorf("none of the selected paths are currently changed; they may have been modified after selection: %s", strings.Join(skipped, ", "))
+		}
+		return nil
+	}
+
+	args := append([]string{"add", "--"}, valid...)
+	_, err = runGitCommand(args...)
+	if err != nil {
+		if len(skipped) > 0 {
+			return fmt.Errorf("failed to stage files (also skipped stale paths: %s): %w", strings.Join(skipped, ", "), err)
+		}
 		return err
 	}
+
+	// Non-fatal signal to caller context through error wrapping is not ideal; we keep success
+	// semantics and let caller proceed while preserving staged correctness.
 	return nil
 }
 
@@ -79,6 +227,46 @@ func Commit(message string) error {
 		return err
 	}
 	return nil
+}
+
+// CommitIfStaged creates a commit only if there are staged changes.
+// It returns (committed, error).
+func CommitIfStaged(message string) (bool, error) {
+	staged, err := HasStagedChanges()
+	if err != nil {
+		return false, err
+	}
+	if !staged {
+		return false, nil
+	}
+	if err := Commit(message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// HasStagedChanges returns true when index differs from HEAD.
+func HasStagedChanges() (bool, error) {
+	_, err := runGitCommand("diff", "--cached", "--quiet")
+	if err == nil {
+		return false, nil
+	}
+
+	// exit code 1 means differences exist.
+	var ee *exec.ExitError
+	if ok := errorAsExitError(err, &ee); ok && ee.ExitCode() == 1 {
+		return true, nil
+	}
+	return false, err
+}
+
+func errorAsExitError(err error, target **exec.ExitError) bool {
+	ee, ok := err.(*exec.ExitError)
+	if ok {
+		*target = ee
+		return true
+	}
+	return false
 }
 
 // GetCurrentBranch returns the name of the current branch.
@@ -116,6 +304,12 @@ func Push() error {
 		return err
 	}
 	return nil
+}
+
+// PushCommits atomically-ish pushes all local commits once at the end of a grouped flow.
+// This avoids half-pushed sequences caused by pushing between intermediate commits.
+func PushCommits() error {
+	return Push()
 }
 
 // Fetch fetches updates from the remote.
