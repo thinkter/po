@@ -21,6 +21,10 @@ func run() error {
 		return fmt.Errorf("error: git is not installed or not in your PATH.\nPlease install git to use po")
 	}
 
+	if !git.IsInsideWorkTree() {
+		return fmt.Errorf("error: not inside a git repository.\nRun 'git init' first or navigate to your project folder")
+	}
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "save":
@@ -31,6 +35,35 @@ func run() error {
 	}
 
 	return runDefaultStatus()
+}
+
+// fileGroup holds a labelled, styled list of paths for display.
+type fileGroup struct {
+	label string
+	style lipgloss.Style
+	paths []string
+}
+
+func classifyStatus(code string) string {
+	if len(code) < 2 {
+		return "modified"
+	}
+	if git.IsConflictStatus(code) {
+		return "conflicted"
+	}
+	xy := code[:2]
+	switch {
+	case xy == "??":
+		return "new"
+	case strings.ContainsAny(xy, "RC"):
+		return "renamed"
+	case strings.ContainsAny(xy, "D"):
+		return "deleted"
+	case strings.ContainsAny(xy, "A"):
+		return "new"
+	default:
+		return "modified"
+	}
 }
 
 func runDefaultStatus() error {
@@ -44,30 +77,6 @@ func runDefaultStatus() error {
 		return err
 	}
 
-	// Unsaved = unstaged + untracked (combined)
-	unsaved := make([]string, 0, len(files))
-	unsavedSet := map[string]struct{}{}
-
-	for _, f := range files {
-		code := normalizeStatusCode(f.Code)
-		path := strings.TrimSpace(f.Path)
-		if path == "" {
-			continue
-		}
-
-		isUntracked := strings.HasPrefix(code, "??")
-		isUnstaged := len(code) >= 2 && code[1] != ' ' && code[1] != '?'
-
-		if isUntracked || isUnstaged {
-			if _, exists := unsavedSet[path]; !exists {
-				unsavedSet[path] = struct{}{}
-				unsaved = append(unsaved, path)
-			}
-		}
-	}
-
-	unsavedCount := len(unsaved)
-
 	// Styles
 	titleStyle := lipgloss.NewStyle().
 		Bold(true).
@@ -80,11 +89,51 @@ func runDefaultStatus() error {
 	okStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
 	warnStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
 	infoStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
-	unsavedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
-
 	sectionHeaderStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("117"))
 	fileBulletStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 
+	modifiedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214"))
+	newStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	deletedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+	renamedStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
+	conflictStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Background(lipgloss.Color("52"))
+
+	// Categorise files into groups.
+	groups := map[string]*fileGroup{
+		"modified":   {label: "Modified", style: modifiedStyle},
+		"new":        {label: "New", style: newStyle},
+		"deleted":    {label: "Deleted", style: deletedStyle},
+		"renamed":    {label: "Renamed", style: renamedStyle},
+		"conflicted": {label: "Conflicted", style: conflictStyle},
+	}
+	// Maintain display order.
+	groupOrder := []string{"conflicted", "modified", "new", "deleted", "renamed"}
+
+	seen := map[string]struct{}{}
+	totalCount := 0
+
+	for _, f := range files {
+		p := strings.TrimSpace(f.EffectivePath())
+		if p == "" {
+			continue
+		}
+		if _, exists := seen[p]; exists {
+			continue
+		}
+		seen[p] = struct{}{}
+		totalCount++
+
+		kind := classifyStatus(f.Code)
+
+		display := p
+		if f.OldPath != "" && f.NewPath != "" {
+			display = f.OldPath + " → " + f.NewPath
+		}
+
+		groups[kind].paths = append(groups[kind].paths, display)
+	}
+
+	// Render header
 	fmt.Println(titleStyle.Render("po status"))
 
 	fmt.Println(lipgloss.JoinHorizontal(
@@ -107,16 +156,21 @@ func runDefaultStatus() error {
 		))
 	}
 
-	if unsavedCount == 0 {
+	if totalCount == 0 {
 		fmt.Println(okStyle.Render("Status: Clean working tree."))
 	} else {
-		fmt.Println(warnStyle.Render(fmt.Sprintf("Status: %d unsaved file(s)", unsavedCount)))
-		fmt.Println("  " + unsavedStyle.Render(fmt.Sprintf("Unsaved: %d", unsavedCount)))
+		fmt.Println(warnStyle.Render(fmt.Sprintf("Status: %d unsaved file(s)", totalCount)))
 		fmt.Println()
 
-		fmt.Println(sectionHeaderStyle.Render("▸ " + unsavedStyle.Render("Unsaved files")))
-		for _, p := range unsaved {
-			fmt.Println("  " + fileBulletStyle.Render("•") + " " + valueStyle.Render(p))
+		for _, kind := range groupOrder {
+			g := groups[kind]
+			if len(g.paths) == 0 {
+				continue
+			}
+			fmt.Println(sectionHeaderStyle.Render("▸ ") + g.style.Render(fmt.Sprintf("%s (%d)", g.label, len(g.paths))))
+			for _, p := range g.paths {
+				fmt.Println("  " + fileBulletStyle.Render("•") + " " + valueStyle.Render(p))
+			}
 		}
 	}
 

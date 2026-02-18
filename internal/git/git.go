@@ -392,3 +392,22 @@ func RemoveCached(paths []string) error {
 	}
 	return nil
 }
+
+// IsInsideWorkTree returns true when the current directory is inside a git work tree.
+func IsInsideWorkTree() bool {
+	_, err := runGitCommand("rev-parse", "--is-inside-work-tree")
+	return err == nil
+}
+
+// IsConflictStatus returns true when the porcelain status code represents an
+// unmerged (conflict) entry: UU, AA, DD, DU, UD, AU, UA.
+func IsConflictStatus(code string) bool {
+	if len(code) < 2 {
+		return false
+	}
+	switch code[:2] {
+	case "DD", "AU", "UD", "UA", "DU", "AA", "UU":
+		return true
+	}
+	return false
+}
