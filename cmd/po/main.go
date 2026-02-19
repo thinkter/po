@@ -137,7 +137,7 @@ func runDefaultStatus() error {
 		}
 
 		groups[kind].items = append(groups[kind].items, statusItem{
-			code:    normalizeStatusCode(f.Code),
+			code:    formatStatusCodeDisplay(f.Code),
 			display: display,
 		})
 	}
@@ -213,4 +213,17 @@ func normalizeStatusCode(code string) string {
 	default:
 		return "  "
 	}
+}
+
+func formatStatusCodeDisplay(code string) string {
+	norm := normalizeStatusCode(code)
+	if norm == "??" {
+		return norm
+	}
+
+	compact := strings.ReplaceAll(norm, " ", "")
+	if compact == "" {
+		return "--"
+	}
+	return compact
 }
