@@ -103,7 +103,7 @@ func runSave() error {
 		huh.NewGroup(
 			huh.NewMultiSelect[string]().
 				Title("Select files to save").
-				Description("Choose one or many files. Use space to toggle selections.").
+				// Description("Choose files to save.").
 				Options(fileOptions...).
 				Value(&selectedRaw).
 				Filterable(true),
@@ -300,20 +300,50 @@ func runSave() error {
 		delete(selectedSet, gip)
 	}
 
-	// After all .gitignore updates are committed, untrack now-ignored files.
-	if len(gitignorePaths) > 0 {
-		fmt.Println("Checking for tracked files now ignored by updated .gitignore...")
-		ignoredTracked, err := git.GetTrackedIgnoredFiles()
-		if err != nil {
-			return fmt.Errorf("failed to detect tracked ignored files: %w", err)
+	// After ignore-rule updates (including .git/info/exclude), optionally untrack
+	// files that are now ignored. This is not limited to .gitignore paths.
+	ignoredTracked, err := git.GetTrackedIgnoredFiles()
+	if err != nil {
+		return fmt.Errorf("failed to detect tracked ignored files: %w", err)
+	}
+	if len(ignoredTracked) > 0 {
+		reason := "current ignore rules"
+		if len(gitignorePaths) > 0 {
+			reason = "updated .gitignore rules"
+		}
+		fmt.Printf("Found %d tracked file(s) matched by %s.\n", len(ignoredTracked), reason)
+		for _, p := range ignoredTracked {
+			fmt.Printf("  • %s\n", p)
+		}
+		fmt.Println()
+
+		var cleanupChoice string
+		cleanupForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Untrack these ignored files now?").
+					Options(
+						huh.NewOption("Yes, untrack them in a separate commit", "yes"),
+						huh.NewOption("No, keep them tracked", "no"),
+					).
+					Value(&cleanupChoice),
+			),
+		)
+
+		if err := cleanupForm.Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				fmt.Println("Aborted.")
+				return nil
+			}
+			return err
 		}
 
-		if len(ignoredTracked) > 0 {
+		if cleanupChoice == "yes" {
 			fmt.Printf("Untracking %d ignored file(s) from repository...\n", len(ignoredTracked))
 			if err := git.RemoveCached(ignoredTracked); err != nil {
 				return fmt.Errorf("failed to untrack ignored files: %w", err)
 			}
-			committed, err := git.CommitIfStaged("chore(gitignore): untrack ignored files")
+			committed, err := git.CommitIfStaged("chore(ignore): untrack ignored files")
 			if err != nil {
 				return fmt.Errorf("failed to commit ignored-file cleanup: %w", err)
 			}
@@ -321,7 +351,7 @@ func runSave() error {
 				fmt.Println("  (no tracked-ignored files needed cleanup)")
 			}
 		} else {
-			fmt.Println("No tracked files are currently matched by ignore rules.")
+			fmt.Println("Keeping currently tracked ignored files unchanged.")
 		}
 	}
 
