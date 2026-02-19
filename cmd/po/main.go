@@ -41,7 +41,13 @@ func run() error {
 type fileGroup struct {
 	label string
 	style lipgloss.Style
-	paths []string
+	items []statusItem
+}
+
+// statusItem keeps display text paired with the porcelain code.
+type statusItem struct {
+	code    string
+	display string
 }
 
 func classifyStatus(code string) string {
@@ -130,7 +136,10 @@ func runDefaultStatus() error {
 			display = f.OldPath + " → " + f.NewPath
 		}
 
-		groups[kind].paths = append(groups[kind].paths, display)
+		groups[kind].items = append(groups[kind].items, statusItem{
+			code:    normalizeStatusCode(f.Code),
+			display: display,
+		})
 	}
 
 	// Render header
@@ -164,12 +173,12 @@ func runDefaultStatus() error {
 
 		for _, kind := range groupOrder {
 			g := groups[kind]
-			if len(g.paths) == 0 {
+			if len(g.items) == 0 {
 				continue
 			}
-			fmt.Println(sectionHeaderStyle.Render("▸ ") + g.style.Render(fmt.Sprintf("%s (%d)", g.label, len(g.paths))))
-			for _, p := range g.paths {
-				fmt.Println("  " + fileBulletStyle.Render("•") + " " + valueStyle.Render(p))
+			fmt.Println(sectionHeaderStyle.Render("▸ ") + g.style.Render(fmt.Sprintf("%s (%d)", g.label, len(g.items))))
+			for _, item := range g.items {
+				fmt.Println("  " + fileBulletStyle.Render("•") + " " + fileBulletStyle.Render("["+item.code+"]") + " " + valueStyle.Render(item.display))
 			}
 		}
 	}

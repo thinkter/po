@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -254,19 +255,10 @@ func HasStagedChanges() (bool, error) {
 
 	// exit code 1 means differences exist.
 	var ee *exec.ExitError
-	if ok := errorAsExitError(err, &ee); ok && ee.ExitCode() == 1 {
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
 		return true, nil
 	}
 	return false, err
-}
-
-func errorAsExitError(err error, target **exec.ExitError) bool {
-	ee, ok := err.(*exec.ExitError)
-	if ok {
-		*target = ee
-		return true
-	}
-	return false
 }
 
 // GetCurrentBranch returns the name of the current branch.
