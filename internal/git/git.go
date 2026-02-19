@@ -169,14 +169,27 @@ func GetStatus() ([]FileStatus, error) {
 
 // StageFiles adds the specified files to the git index.
 func StageFiles(files []string) error {
+	staged, skipped, err := StageFilesWithReport(files)
+	if err != nil {
+		return err
+	}
+	if len(staged) == 0 && len(skipped) > 0 {
+		return fmt.Errorf("none of the selected paths are currently changed; they may have been modified after selection: %s", strings.Join(skipped, ", "))
+	}
+	return nil
+}
+
+// StageFilesWithReport stages changed files and reports which requested paths
+// were skipped because they were no longer changed at stage time.
+func StageFilesWithReport(files []string) (staged []string, skipped []string, err error) {
 	if len(files) == 0 {
-		return nil
+		return nil, nil, nil
 	}
 
 	// Revalidate currently changed paths at stage time to reduce race-window issues.
 	current, err := GetStatus()
 	if err != nil {
-		return fmt.Errorf("failed to refresh git status before staging: %w", err)
+		return nil, nil, fmt.Errorf("failed to refresh git status before staging: %w", err)
 	}
 	available := make(map[string]struct{}, len(current))
 	for _, f := range current {
@@ -187,7 +200,7 @@ func StageFiles(files []string) error {
 	}
 
 	valid := make([]string, 0, len(files))
-	var skipped []string
+	var stale []string
 	for _, p := range files {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -197,28 +210,23 @@ func StageFiles(files []string) error {
 			valid = append(valid, p)
 			continue
 		}
-		skipped = append(skipped, p)
+		stale = append(stale, p)
 	}
 
 	if len(valid) == 0 {
-		if len(skipped) > 0 {
-			return fmt.Errorf("none of the selected paths are currently changed; they may have been modified after selection: %s", strings.Join(skipped, ", "))
-		}
-		return nil
+		return nil, stale, nil
 	}
 
 	args := append([]string{"add", "--"}, valid...)
 	_, err = runGitCommand(args...)
 	if err != nil {
-		if len(skipped) > 0 {
-			return fmt.Errorf("failed to stage files (also skipped stale paths: %s): %w", strings.Join(skipped, ", "), err)
+		if len(stale) > 0 {
+			return nil, stale, fmt.Errorf("failed to stage files (also skipped stale paths: %s): %w", strings.Join(stale, ", "), err)
 		}
-		return err
+		return nil, stale, err
 	}
 
-	// Non-fatal signal to caller context through error wrapping is not ideal; we keep success
-	// semantics and let caller proceed while preserving staged correctness.
-	return nil
+	return valid, stale, nil
 }
 
 // Commit creates a new commit with the given message.

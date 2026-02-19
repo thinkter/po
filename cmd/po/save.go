@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"po/internal/git"
@@ -55,11 +56,13 @@ func runSave() error {
 	// Uses EffectivePath() so renames resolve to the new path and quoted paths are already unquoted.
 	statusPathSet := make(map[string]struct{}, len(clean))
 	statusPaths := make([]string, 0, len(clean))
+	statusSnapshot := make(map[string]string, len(clean))
 	for _, f := range clean {
 		p := strings.TrimSpace(f.EffectivePath())
 		if p == "" {
 			continue
 		}
+		statusSnapshot[p] = normalizeStatusCode(f.Code)
 		if _, exists := statusPathSet[p]; !exists {
 			statusPathSet[p] = struct{}{}
 			statusPaths = append(statusPaths, p)
@@ -216,13 +219,74 @@ func runSave() error {
 		}
 	}
 
+	// Detect selection drift before staging, so users can decide how to proceed.
+	drift, err := detectSelectionDrift(selectedSet, statusSnapshot)
+	if err != nil {
+		return fmt.Errorf("failed to re-check file status before staging: %w", err)
+	}
+	if drift.hasChanges() {
+		fmt.Println("Some selected files changed after you made your selection:")
+		for _, p := range drift.missing {
+			fmt.Printf("  • %s (no longer changed or missing)\n", p)
+		}
+		for _, entry := range drift.changed {
+			fmt.Printf("  • %s\n", entry)
+		}
+		fmt.Println()
+
+		var driftChoice string
+		driftForm := huh.NewForm(
+			huh.NewGroup(
+				huh.NewSelect[string]().
+					Title("Selection drift detected. What do you want to do?").
+					Options(
+						huh.NewOption("Continue with currently available files", "continue"),
+						huh.NewOption("Cancel and re-run po save", "rerun"),
+						huh.NewOption("Abort", "abort"),
+					).
+					Value(&driftChoice),
+			),
+		)
+
+		if err := driftForm.Run(); err != nil {
+			if errors.Is(err, huh.ErrUserAborted) {
+				fmt.Println("Aborted.")
+				return nil
+			}
+			return err
+		}
+
+		switch driftChoice {
+		case "continue":
+			for _, p := range drift.missing {
+				delete(selectedSet, p)
+			}
+		case "rerun":
+			fmt.Println("Canceled. Re-run `po save` to make a fresh selection.")
+			return nil
+		default:
+			fmt.Println("Aborted.")
+			return nil
+		}
+	}
+
 	// 5) If .gitignore files are part of this save, commit them first.
 	//    All commits are made locally first; pushing is deferred to the end
 	//    so we never end up in a half-pushed state.
 	for _, gip := range gitignorePaths {
 		fmt.Printf("Prioritizing %s in a separate commit...\n", gip)
-		if err := git.StageFiles([]string{gip}); err != nil {
+		staged, skipped, err := git.StageFilesWithReport([]string{gip})
+		if err != nil {
 			return fmt.Errorf("failed to stage %s: %w", gip, err)
+		}
+		if len(skipped) > 0 {
+			fmt.Printf("  Skipped %s (it changed after selection).\n", gip)
+			delete(selectedSet, gip)
+			continue
+		}
+		if len(staged) == 0 {
+			delete(selectedSet, gip)
+			continue
 		}
 		committed, err := git.CommitIfStaged("chore(gitignore): update ignore rules")
 		if err != nil {
@@ -271,8 +335,19 @@ func runSave() error {
 
 	if len(remaining) > 0 {
 		fmt.Println("Staging remaining selected files...")
-		if err := git.StageFiles(remaining); err != nil {
+		staged, skipped, err := git.StageFilesWithReport(remaining)
+		if err != nil {
 			return fmt.Errorf("failed to stage selected files: %w", err)
+		}
+		if len(skipped) > 0 {
+			fmt.Println("Some selected files were not staged because they changed after selection:")
+			for _, p := range skipped {
+				fmt.Printf("  • %s\n", p)
+			}
+		}
+		if len(staged) == 0 {
+			fmt.Println("No selected files could be staged from your current selection.")
+			return nil
 		}
 
 		fmt.Printf("Committing: %s\n", fullMessage)
@@ -296,4 +371,64 @@ func runSave() error {
 
 	fmt.Println("Success!")
 	return nil
+}
+
+type selectionDrift struct {
+	missing []string
+	changed []string
+}
+
+func (d selectionDrift) hasChanges() bool {
+	return len(d.missing) > 0 || len(d.changed) > 0
+}
+
+func detectSelectionDrift(selectedSet map[string]struct{}, snapshot map[string]string) (selectionDrift, error) {
+	current, err := git.GetStatus()
+	if err != nil {
+		return selectionDrift{}, err
+	}
+
+	currentByPath := make(map[string]string, len(current))
+	for _, f := range current {
+		p := strings.TrimSpace(f.EffectivePath())
+		if p == "" {
+			continue
+		}
+		currentByPath[p] = normalizeStatusCode(f.Code)
+	}
+
+	drift := selectionDrift{
+		missing: []string{},
+		changed: []string{},
+	}
+
+	for p := range selectedSet {
+		before, hadBefore := snapshot[p]
+		now, hasNow := currentByPath[p]
+
+		if !hasNow {
+			drift.missing = append(drift.missing, p)
+			continue
+		}
+		if hadBefore && before != now {
+			drift.changed = append(drift.changed, fmt.Sprintf("%s (%s -> %s)", p, compactStatusCode(before), compactStatusCode(now)))
+		}
+	}
+
+	sort.Strings(drift.missing)
+	sort.Strings(drift.changed)
+
+	return drift, nil
+}
+
+func compactStatusCode(code string) string {
+	norm := normalizeStatusCode(code)
+	if norm == "??" {
+		return norm
+	}
+	c := strings.ReplaceAll(norm, " ", "")
+	if c == "" {
+		return "--"
+	}
+	return c
 }
