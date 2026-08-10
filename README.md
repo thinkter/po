@@ -1,38 +1,56 @@
 # po
 
-`po` is a CLI tool designed to be an abstraction layer on top of Git and GitHub, making it incredibly easy to set up and use version control.
+<div align="center">
+
+![Go](https://img.shields.io/badge/Go-CLI-00ADD8?logo=go&logoColor=white)
+![Git](https://img.shields.io/badge/integration-Git-F05032?logo=git&logoColor=white)
+![Status](https://img.shields.io/badge/status-early_experiment-f59e0b)
+
+An experimental command-line abstraction over Git and GitHub workflows.
+
+</div>
+
+```mermaid
+flowchart LR
+  USER["Developer"] --> PO["po CLI"]
+  PO --> CHECK["Environment checks"]
+  CHECK --> GIT["System Git executable"]
+  GIT --> REPO["Local repository"]
+```
+
+## Current behavior
+
+The current implementation verifies that `git` is available on the system and establishes the internal package boundary for future Git operations.
 
 ## Prerequisites
 
-`po` relies on the system's `git` installation. Please ensure `git` is installed and available in your system's PATH.
+- Go
+- Git available on `PATH`
 
-## Development
-
-### Running from source
-
-You can run the application directly using Go:
+## Run from source
 
 ```bash
-go run cmd/po/main.go
+go run ./cmd/po
 ```
 
-### Building
+Expected output on a configured machine:
 
-To build the binary:
-
-```bash
-go build -o po cmd/po/main.go
+```text
+git is installed! Ready to rock.
 ```
 
-## Usage
-
-Currently, running `po` performs a system check to verify that `git` is installed and accessible.
+## Build
 
 ```bash
+go build -o po ./cmd/po
 ./po
 ```
 
-Output on success:
-```
-git is installed! Ready to rock.
-```
+## Project layout
+
+- `cmd/po/main.go` is the CLI entry point.
+- `internal/git/git.go` wraps interactions with the system Git executable.
+
+## Status
+
+`po` is at the foundation stage. Repository initialization, remotes, commits, pushes, and GitHub operations are planned but are not yet exposed by the CLI.
